@@ -3,69 +3,80 @@ const https = require('https');
 
 const PORT = process.env.PORT || 3000;
 
-function fetchWithGoogle(mediumUrl, callback) {
-  // Use Google Search cache trick
-  const googleUrl = `https://www.google.com/url?q=${encodeURIComponent(mediumUrl)}`;
+function fetchArticle(mediumUrl, callback) {
+  // Use freedium.cfd proxy
+  const proxyUrl = `https://freedium.cfd/${mediumUrl}`;
   
   const options = {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9'
     }
   };
 
-  https.get(mediumUrl, options, (res) => {
-    let data = '';
-    res.on('data', chunk => data += chunk);
-    res.on('end', () => callback(null, data));
-  }).on('error', (e) => callback(e));
+  https.get(proxyUrl, options, (res) => {
+    if (res.statusCode === 301 || res.statusCode === 302) {
+      https.get(res.headers.location, options, (res2) => {
+        let data = '';
+        res2.on('data', chunk => data += chunk);
+        res2.on('end', () => callback(null, data));
+      }).on('error', callback);
+    } else {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => callback(null, data));
+    }
+  }).on('error', callback);
 }
 
-function cleanContent(html) {
-  // Extract JSON data from Medium's page
-  const match = html.match(/<script>window\.__APOLLO_STATE__ = (.*?)<\/script>/);
+function extractContent(html) {
+  // Remove scripts and styles
+  let content = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+  content = content.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
   
-  if (match) {
-    try {
-      const data = JSON.parse(match[1]);
-      let content = '';
-      let title = '';
-      
-      // Find article content in Apollo state
-      for (let key in data) {
-        if (key.startsWith('Post:') && data[key].title) {
-          title = data[key].title;
-        }
-        if (key.startsWith('Paragraph:') && data[key].text) {
-          content += `<p>${data[key].text}</p>`;
-        }
+  // Extract title
+  const titleMatch = content.match(/<title>(.*?)<\/title>/i);
+  let title = titleMatch ? titleMatch[1].replace(/\s*\|\s*Freedium/gi, '').trim() : 'Article';
+  
+  // Try to find main article content
+  let articleContent = '';
+  
+  // Look for article tag
+  const articleMatch = content.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+  if (articleMatch) {
+    articleContent = articleMatch[1];
+  } else {
+    // Look for main content div
+    const mainMatch = content.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+    if (mainMatch) {
+      articleContent = mainMatch[1];
+    } else {
+      // Look for content class
+      const contentMatch = content.match(/<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+      if (contentMatch) {
+        articleContent = contentMatch[1];
       }
-      
-      return { title, content };
-    } catch (e) {
-      // Fallback to HTML parsing
     }
   }
   
-  // Fallback: Extract from HTML
-  const titleMatch = html.match(/<h1[^>]*>(.*?)<\/h1>/);
-  const title = titleMatch ? titleMatch[1].replace(/<[^>]*>/g, '') : 'Article';
-  
-  // Get article content
-  let content = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-  if (content) {
-    content = content[1];
-    // Clean up
-    content = content.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-    content = content.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
-    content = content.replace(/class="[^"]*"/g, '');
-    content = content.replace(/data-[^=]*="[^"]*"/g, '');
-  } else {
-    content = '<p>Could not extract content. Try a different article.</p>';
+  // Clean up the content
+  if (articleContent) {
+    // Remove navigation, footer, etc
+    articleContent = articleContent.replace(/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/gi, '');
+    articleContent = articleContent.replace(/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi, '');
+    articleContent = articleContent.replace(/<aside\b[^<]*(?:(?!<\/aside>)<[^<]*)*<\/aside>/gi, '');
+    
+    // Clean attributes but keep structure
+    articleContent = articleContent.replace(/\s*class="[^"]*"/gi, '');
+    articleContent = articleContent.replace(/\s*id="[^"]*"/gi, '');
+    articleContent = articleContent.replace(/\s*data-[^=]*="[^"]*"/gi, '');
   }
   
-  return { title, content };
+  return {
+    title: title || 'Article',
+    content: articleContent || '<p>Content could not be extracted. The article may not be available.</p>'
+  };
 }
 
 const server = http.createServer((req, res) => {
@@ -83,7 +94,7 @@ const server = http.createServer((req, res) => {
   <title>Medium Reader</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; background: #fafafa; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #fafafa; }
     .header { background: #fff; border-bottom: 1px solid #e6e6e6; padding: 1rem; position: sticky; top: 0; z-index: 10; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
     .container { max-width: 680px; margin: 0 auto; padding: 1rem; }
     h1 { font-size: 1.5rem; font-weight: 600; }
@@ -91,20 +102,27 @@ const server = http.createServer((req, res) => {
     input { width: 100%; padding: 0.875rem 1rem; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; transition: all 0.2s; }
     input:focus { outline: none; border-color: #000; box-shadow: 0 0 0 3px rgba(0,0,0,0.1); }
     button { width: 100%; padding: 0.875rem; background: #000; color: #fff; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; margin-top: 0.75rem; transition: background 0.2s; }
-    button:hover { background: #333; }
+    button:hover:not(:disabled) { background: #333; }
     button:disabled { background: #ccc; cursor: not-allowed; }
     .article { background: #fff; padding: 2.5rem 2rem; border-radius: 8px; margin-top: 2rem; display: none; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
     .article.show { display: block; }
     .article h2 { font-size: 2.25rem; margin-bottom: 2rem; line-height: 1.25; font-weight: 700; }
     .article-content { font-size: 1.125rem; line-height: 1.8; color: #242424; }
     .article-content p { margin-bottom: 1.75rem; }
-    .article-content h1, .article-content h2, .article-content h3 { margin: 2.5rem 0 1rem; font-weight: 700; }
+    .article-content h1, .article-content h2, .article-content h3, .article-content h4 { margin: 2.5rem 0 1rem; font-weight: 700; }
     .article-content h1 { font-size: 2rem; }
-    .article-content h2 { font-size: 1.5rem; }
+    .article-content h2 { font-size: 1.75rem; }
+    .article-content h3 { font-size: 1.5rem; }
     .article-content img { max-width: 100%; height: auto; margin: 2rem 0; border-radius: 4px; }
+    .article-content figure { margin: 2rem 0; }
     .article-content pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; margin: 1.5rem 0; font-size: 0.9rem; }
-    .article-content code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 3px; font-family: 'Courier New', monospace; }
+    .article-content code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 3px; font-family: 'Courier New', monospace; font-size: 0.9em; }
+    .article-content pre code { background: none; padding: 0; }
     .article-content blockquote { border-left: 3px solid #000; padding-left: 1.5rem; margin: 1.5rem 0; font-style: italic; color: #555; }
+    .article-content ul, .article-content ol { margin: 1rem 0 1.75rem 1.5rem; }
+    .article-content li { margin-bottom: 0.5rem; }
+    .article-content a { color: #0066cc; text-decoration: none; }
+    .article-content a:hover { text-decoration: underline; }
     .loading { text-align: center; padding: 3rem; display: none; color: #666; }
     .loading.show { display: block; }
     .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #000; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
@@ -128,16 +146,16 @@ const server = http.createServer((req, res) => {
   </div>
   <div class="container">
     <div class="info">
-      Paste any Medium article URL below to read it without limits.
+      Paste any Medium article URL to read it without paywall limits.
     </div>
     <div class="input-group">
-      <input type="url" id="url" placeholder="https://medium.com/...">
+      <input type="url" id="url" placeholder="https://medium.com/..." value="">
       <button onclick="read()" id="btn">Read Article</button>
     </div>
     <div class="error" id="error"></div>
     <div class="loading" id="loading">
       <div class="spinner"></div>
-      <div>Loading article...</div>
+      <div>Fetching article... This may take 10-15 seconds</div>
     </div>
     <div class="article" id="article">
       <h2 id="title"></h2>
@@ -175,12 +193,11 @@ const server = http.createServer((req, res) => {
         document.getElementById('content').innerHTML = data.content;
         document.getElementById('article').classList.add('show');
         
-        // Scroll to article
         setTimeout(() => {
-          document.getElementById('article').scrollIntoView({ behavior: 'smooth' });
+          document.getElementById('article').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 100);
       } catch (e) {
-        showError('Failed to load article. Please try again.');
+        showError('Failed to load article. Please try again or try a different article.');
       }
       
       document.getElementById('loading').classList.remove('show');
@@ -194,7 +211,6 @@ const server = http.createServer((req, res) => {
       document.getElementById('btn').disabled = false;
     }
     
-    // Allow Enter key
     document.getElementById('url').addEventListener('keypress', (e) => {
       if (e.key === 'Enter') read();
     });
@@ -213,14 +229,14 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    fetchWithGoogle(articleUrl, (err, html) => {
+    fetchArticle(articleUrl, (err, html) => {
       if (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Failed to fetch article' }));
+        res.end(JSON.stringify({ error: 'Failed to fetch article. Please try again.' }));
         return;
       }
 
-      const { title, content } = cleanContent(html);
+      const { title, content } = extractContent(html);
       
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ title, content }));
